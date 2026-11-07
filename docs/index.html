@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PayID MVP Demo</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<style>
+  :root { --bg:#0f1115; --card:#1a1d24; --tx:#e8eaed; --mut:#9aa0a6; --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --acc:#3b82f6; }
+  * { box-sizing:border-box; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+  body { margin:0; background:var(--bg); color:var(--tx); padding:16px; }
+  .card { background:var(--card); border-radius:14px; padding:16px; max-width:480px; margin:0 auto 16px; }
+  h1 { font-size:18px; margin:0 0 12px; } h2 { font-size:15px; margin:0 0 8px; color:var(--mut); }
+  label { display:block; font-size:12px; color:var(--mut); margin:8px 0 4px; }
+  input { width:100%; padding:10px; border-radius:8px; border:1px solid #333; background:#0b0d11; color:var(--tx); font-size:15px; }
+  button { width:100%; padding:14px; border:0; border-radius:10px; font-size:16px; font-weight:600; margin-top:12px; cursor:pointer; background:var(--acc); color:#fff; }
+  button.sec { background:#2a2f3a; } button:disabled { opacity:.5; }
+  .status { text-align:center; font-size:28px; font-weight:800; padding:18px; border-radius:12px; margin-top:12px; }
+  .s-awaiting { background:#1e293b; color:var(--mut); } .s-paid { background:var(--ok); color:#04130a; }
+  .s-mismatch, .s-late_paid { background:var(--warn); color:#1a1200; } .s-expired, .s-cancelled { background:#3a1d1d; color:var(--bad); }
+  #qr { background:#fff; padding:12px; border-radius:12px; width:fit-content; margin:12px auto; }
+  .payid { font-family:ui-monospace,monospace; text-align:center; font-size:15px; word-break:break-all; }
+  .mut { color:var(--mut); font-size:12px; } a { color:var(--acc); }
+  .bank { background:#fff; color:#111; } .bank h1 { color:#c8102e; } .bank input { background:#f4f4f4; color:#111; border-color:#ddd; }
+  .bank label, .bank .mut { color:#555; } .big { font-size:34px; font-weight:800; text-align:center; margin:8px 0; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const P = new URLSearchParams(location.search);
+const view = P.get('view') || 'pos';
+const $ = (h) => { const d = document.createElement('div'); d.innerHTML = h; return d.firstElementChild; };
+const money = (c) => '$' + (c / 100).toFixed(2);
+const store = {
+  get(k) { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+const app = document.getElementById('app');
+
+// ---------------- MOCK BANK (customer's phone) ----------------
+if (view === 'bank') {
+  const payid = P.get('payid'), amount = Number(P.get('amount')), api = P.get('api');
+  app.append($(`<div class="card bank">
+    <h1>🏦 Mock Bank</h1>
+    <h2 style="color:#555">Pay to PayID</h2>
+    <div class="payid">${payid}</div>
+    <div class="mut" style="text-align:center">${P.get('desc') || ''}</div>
+    <div class="big">${money(amount)}</div>
+    <label>Amount (change to test mismatch)</label>
+    <input id="amt" inputmode="decimal" value="${(amount / 100).toFixed(2)}">
+    <label>Payer name</label><input id="nm" value="TEST CUSTOMER">
+    <button id="pay" style="background:#c8102e">Pay with Face ID</button>
+    <div id="msg" class="mut" style="text-align:center;margin-top:10px"></div>
+  </div>`));
+  document.getElementById('pay').onclick = async (e) => {
+    e.target.disabled = true; document.getElementById('msg').textContent = 'Sending via NPP…';
+    const cents = Math.round(parseFloat(document.getElementById('amt').value) * 100);
+    try {
+      const r = await fetch(api + '/mock-provider', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ payid, paid_cents: cents, payer_name: document.getElementById('nm').value }) });
+      const j = await r.json();
+      document.getElementById('msg').textContent = r.ok ? `✅ Sent. Result: ${j.webhook?.result}` : `❌ ${j.error}`;
+    } catch (err) { document.getElementById('msg').textContent = '❌ ' + err.message; e.target.disabled = false; }
+  };
+}
+
+// ---------------- POS (staff) ----------------
+else {
+  app.append($(`<div class="card">
+    <h1>⚙️ Settings</h1>
+    <label>Supabase URL</label><input id="url" placeholder="https://xxxx.supabase.co">
+    <label>Anon key</label><input id="anon">
+    <label>POS API key (x-pos-key)</label><input id="pk">
+    <label>Store ID</label><input id="sid" value="HP">
+  </div>`));
+  app.append($(`<div class="card">
+    <h1>💳 Take PayID payment</h1>
+    <label>Order ID</label><input id="oid">
+    <label>Amount ($)</label><input id="amt" inputmode="decimal" value="42.50">
+    <button id="go">Show PayID</button>
+    <div id="out"></div>
+  </div>`));
+  for (const id of ['url', 'anon', 'pk', 'sid']) {
+    const el = document.getElementById(id); if (store.get('payid_' + id)) el.value = store.get('payid_' + id);
+    el.onchange = () => store.set('payid_' + id, el.value.trim());
+  }
+  const newOrder = () => document.getElementById('oid').value = 'ORD-' + Date.now().toString().slice(-6);
+  newOrder();
+
+  let sb, channel, poll, timer;
+  const out = document.getElementById('out');
+
+  function render(i) {
+    const left = Math.max(0, Math.round((new Date(i.expires_at) - Date.now()) / 1000));
+    const label = { awaiting: `Waiting… ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`,
+      paid: `PAID ✓ ${money(i.paid_cents)}`, mismatch: `WRONG AMOUNT: got ${money(i.paid_cents)}`,
+      expired: 'EXPIRED', cancelled: 'CANCELLED', late_paid: `LATE PAYMENT ${money(i.paid_cents)} → REFUND` }[i.status] || i.status;
+    document.getElementById('st').className = 'status s-' + i.status;
+    document.getElementById('st').textContent = label;
+    document.getElementById('payer').textContent = i.payer_name ? 'From: ' + i.payer_name : '';
+    if (i.status !== 'awaiting') stop(false);
+  }
+  function stop(clear) {
+    if (channel) { sb.removeChannel(channel); channel = null; }
+    clearInterval(poll); clearInterval(timer);
+    if (clear) out.innerHTML = '';
+  }
+
+  async function call(body) {
+    const r = await fetch(document.getElementById('url').value.trim() + '/functions/v1/payid-intents', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-pos-key': document.getElementById('pk').value.trim() },
+      body: JSON.stringify(body) });
+    const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j;
+  }
+
+  document.getElementById('go').onclick = async (e) => {
+    stop(true); e.target.disabled = true;
+    try {
+      const url = document.getElementById('url').value.trim(), anon = document.getElementById('anon').value.trim();
+      sb = sb || supabase.createClient(url, anon);
+      let i = await call({ action: 'create', order_id: document.getElementById('oid').value,
+        store_id: document.getElementById('sid').value, amount_cents: Math.round(parseFloat(document.getElementById('amt').value) * 100) });
+      out.append($(`<div>
+        <div id="qr"></div>
+        <div class="payid">${i.payid}</div>
+        <div class="big">${money(i.amount_cents)}</div>
+        <div id="st" class="status"></div>
+        <div id="payer" class="mut" style="text-align:center;margin-top:6px"></div>
+        <p class="mut" style="text-align:center">Testing on this device? <a href="${i.qr_payload}" target="_blank">Open mock bank</a></p>
+        <button class="sec" id="cancel">Cancel → take cash/card</button>
+        <button class="sec" id="next">New order</button>
+      </div>`));
+      new QRCode(document.getElementById('qr'), { text: i.qr_payload, width: 220, height: 220 });
+      render(i);
+      document.getElementById('cancel').onclick = async () => { try { render(await call({ action: 'cancel', intent_id: i.id })); } catch (er) { alert(er.message); } };
+      document.getElementById('next').onclick = () => { stop(true); newOrder(); };
+
+      // realtime push
+      channel = sb.channel('pi-' + i.id).on('postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'payment_intents', filter: 'id=eq.' + i.id },
+        (p) => { i = p.new; render(i); }).subscribe();
+      // fallback poll every 5s in case realtime drops
+      poll = setInterval(async () => {
+        const { data } = await sb.from('payment_intents').select('*').eq('id', i.id).single();
+        if (data) { i = data; render(i); }
+      }, 5000);
+      timer = setInterval(() => render(i), 1000);
+    } catch (er) { out.innerHTML = `<p style="color:var(--bad)">${er.message}</p>`; }
+    e.target.disabled = false;
+  };
+}
+</script>
+</body>
+</html>
