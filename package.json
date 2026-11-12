@@ -1,0 +1,13 @@
+{
+  "name": "payid-mvp",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/db/apply_payment.test.mjs && deno test --allow-env tests/functions/",
+    "test:db": "node tests/db/apply_payment.test.mjs",
+    "test:functions": "deno test --allow-env tests/functions/"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.16"
+  }
+}
